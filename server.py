@@ -1,7 +1,7 @@
 """
 Calibre MCP Server
 Connect your Calibre ebook library to Claude AI via the Model Context Protocol.
-Exposes metadata search, full-text content search, and library browsing tools.
+Exposes metadata search, full-text content search, excerpt extraction, and library browsing.
 
 Reads metadata.db and full-text-search.db (SQLite) in read-only mode.
 Requires Calibre 6+ with Full Text Search indexing enabled.
@@ -16,10 +16,6 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, ConfigDict
 
-# ---------------------------------------------------------------------------
-# Configuration — override via environment variables
-# ---------------------------------------------------------------------------
-
 CALIBRE_LIBRARY = os.environ.get("CALIBRE_LIBRARY_PATH", "/calibre-library")
 METADATA_DB = os.path.join(CALIBRE_LIBRARY, "metadata.db")
 FTS_DB = os.path.join(CALIBRE_LIBRARY, "full-text-search.db")
@@ -28,13 +24,8 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("calibre_mcp")
 
-# ---------------------------------------------------------------------------
-# Database helpers
-# ---------------------------------------------------------------------------
-
 
 def get_db():
-    """Open metadata.db read-only and attach full-text-search.db."""
     conn = sqlite3.connect(f"file:{METADATA_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only = ON;")
@@ -43,77 +34,33 @@ def get_db():
 
 
 def build_book_dict(row, conn):
-    """Enrich a raw book row with authors, tags, series, formats, etc."""
     book = dict(row)
     bid = book["id"]
-
-    authors = conn.execute(
-        "SELECT a.name FROM authors a "
-        "JOIN books_authors_link bal ON a.id = bal.author WHERE bal.book = ?",
-        (bid,),
-    ).fetchall()
+    authors = conn.execute("SELECT a.name FROM authors a JOIN books_authors_link bal ON a.id = bal.author WHERE bal.book = ?", (bid,)).fetchall()
     book["authors"] = [a["name"] for a in authors]
-
-    tags = conn.execute(
-        "SELECT t.name FROM tags t "
-        "JOIN books_tags_link btl ON t.id = btl.tag WHERE btl.book = ?",
-        (bid,),
-    ).fetchall()
+    tags = conn.execute("SELECT t.name FROM tags t JOIN books_tags_link btl ON t.id = btl.tag WHERE btl.book = ?", (bid,)).fetchall()
     book["tags"] = [t["name"] for t in tags]
-
-    series = conn.execute(
-        "SELECT s.name, b.series_index FROM series s "
-        "JOIN books_series_link bsl ON s.id = bsl.series "
-        "JOIN books b ON b.id = bsl.book WHERE bsl.book = ?",
-        (bid,),
-    ).fetchone()
+    series = conn.execute("SELECT s.name, b.series_index FROM series s JOIN books_series_link bsl ON s.id = bsl.series JOIN books b ON b.id = bsl.book WHERE bsl.book = ?", (bid,)).fetchone()
     book["series"] = series["name"] if series else None
     book["series_index"] = series["series_index"] if series else None
-
-    pub = conn.execute(
-        "SELECT p.name FROM publishers p "
-        "JOIN books_publishers_link bpl ON p.id = bpl.publisher WHERE bpl.book = ?",
-        (bid,),
-    ).fetchone()
+    pub = conn.execute("SELECT p.name FROM publishers p JOIN books_publishers_link bpl ON p.id = bpl.publisher WHERE bpl.book = ?", (bid,)).fetchone()
     book["publisher"] = pub["name"] if pub else None
-
-    langs = conn.execute(
-        "SELECT l.lang_code FROM languages l "
-        "JOIN books_languages_link bll ON l.id = bll.lang_code WHERE bll.book = ?",
-        (bid,),
-    ).fetchall()
+    langs = conn.execute("SELECT l.lang_code FROM languages l JOIN books_languages_link bll ON l.id = bll.lang_code WHERE bll.book = ?", (bid,)).fetchall()
     book["languages"] = [la["lang_code"] for la in langs]
-
-    formats = conn.execute(
-        "SELECT format, uncompressed_size FROM data WHERE book = ?", (bid,)
-    ).fetchall()
+    formats = conn.execute("SELECT format, uncompressed_size FROM data WHERE book = ?", (bid,)).fetchall()
     book["formats"] = [f["format"] for f in formats]
-
-    comment = conn.execute(
-        "SELECT text FROM comments WHERE book = ?", (bid,)
-    ).fetchone()
+    comment = conn.execute("SELECT text FROM comments WHERE book = ?", (bid,)).fetchone()
     book["description"] = comment["text"] if comment else None
-
-    idents = conn.execute(
-        "SELECT type, val FROM identifiers WHERE book = ?", (bid,)
-    ).fetchall()
+    idents = conn.execute("SELECT type, val FROM identifiers WHERE book = ?", (bid,)).fetchall()
     book["identifiers"] = {i["type"]: i["val"] for i in idents}
-
-    rating = conn.execute(
-        "SELECT r.rating FROM ratings r "
-        "JOIN books_ratings_link brl ON r.id = brl.rating WHERE brl.book = ?",
-        (bid,),
-    ).fetchone()
+    rating = conn.execute("SELECT r.rating FROM ratings r JOIN books_ratings_link brl ON r.id = brl.rating WHERE brl.book = ?", (bid,)).fetchone()
     book["rating"] = rating["rating"] if rating else None
-
     for key in ("sort", "author_sort", "lccn", "flags", "path"):
         book.pop(key, None)
-
     return book
 
 
 def format_book_markdown(book):
-    """Format a single book as readable Markdown."""
     lines = [f"### {book['title']}"]
     if book.get("authors"):
         lines.append(f"**Authors**: {', '.join(book['authors'])}")
@@ -131,7 +78,7 @@ def format_book_markdown(book):
         lines.append(f"**Formats**: {', '.join(book['formats'])}")
     if book.get("rating"):
         stars = book["rating"] // 2
-        lines.append(f"**Rating**: {'★' * stars}{'☆' * (5 - stars)}")
+        lines.append(f"**Rating**: {'*' * stars}{'.' * (5 - stars)}")
     if book.get("identifiers"):
         ids = ", ".join(f"{k}: {v}" for k, v in book["identifiers"].items())
         lines.append(f"**Identifiers**: {ids}")
@@ -144,10 +91,6 @@ def format_book_markdown(book):
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# MCP Server initialization
-# ---------------------------------------------------------------------------
-
 mcp = FastMCP(
     "calibre_mcp",
     host="0.0.0.0",
@@ -159,13 +102,8 @@ mcp = FastMCP(
     },
 )
 
-# ---------------------------------------------------------------------------
-# Input models
-# ---------------------------------------------------------------------------
-
 
 class SearchBooksInput(BaseModel):
-    """Search books by metadata fields."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     query: str = Field(..., description="Search term for title, author, tag, series, or publisher.", min_length=1, max_length=200)
     field: Optional[str] = Field(default=None, description="Restrict to: 'title', 'author', 'tag', 'series', 'publisher'.")
@@ -174,7 +112,6 @@ class SearchBooksInput(BaseModel):
 
 
 class SearchContentInput(BaseModel):
-    """Full-text search inside book contents."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     query: str = Field(..., description="Words or phrase to search inside books.", min_length=1, max_length=300)
     use_stemming: bool = Field(default=True, description="Reserved for future use.")
@@ -183,22 +120,23 @@ class SearchContentInput(BaseModel):
 
 
 class GetBookInput(BaseModel):
-    """Get book by Calibre ID."""
     model_config = ConfigDict(extra="forbid")
     book_id: int = Field(..., description="Calibre book ID", ge=1)
 
 
+class GetExcerptInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    book_id: int = Field(..., description="Calibre book ID", ge=1)
+    query: str = Field(..., description="Word or phrase to locate in the book text", min_length=1, max_length=200)
+    context_chars: int = Field(default=2000, description="Characters of context around the match (default 2000, max 10000)", ge=500, le=10000)
+    occurrence: int = Field(default=1, description="Which occurrence to extract (1 = first, 2 = second, etc.)", ge=1, le=50)
+
+
 class ListInput(BaseModel):
-    """List with optional filter and pagination."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     filter: Optional[str] = Field(default=None, description="Substring filter (case-insensitive)")
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
-
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
 
 
 @mcp.tool(name="calibre_search_books", annotations={"title": "Search books by metadata", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
@@ -227,22 +165,18 @@ async def calibre_search_books(params: SearchBooksInput) -> str:
                      "(SELECT bpl.book FROM books_publishers_link bpl JOIN publishers p ON "
                      "p.id = bpl.publisher WHERE p.name LIKE ?))")
             sql_params = [q] * 5
-
         total = conn.execute(f"SELECT COUNT(*) as total FROM books b WHERE {where}", sql_params).fetchone()["total"]
         sql_params.extend([params.limit, params.offset])
         rows = conn.execute(f"SELECT b.* FROM books b WHERE {where} ORDER BY b.last_modified DESC LIMIT ? OFFSET ?", sql_params).fetchall()
-
         if not rows:
             return f"No books found for '{params.query}'."
-
         books = [build_book_dict(r, conn) for r in rows]
         parts = [f"## Results for '{params.query}' ({total} books)\n"]
         for book in books:
             parts.append(format_book_markdown(book))
             parts.append("---")
-
         if total > params.offset + len(rows):
-            parts.append(f"\n*Page {params.offset // params.limit + 1} — {len(rows)} shown of {total}. Use offset={params.offset + params.limit} for next page.*")
+            parts.append(f"\n*Page {params.offset // params.limit + 1} - {len(rows)} shown of {total}. Use offset={params.offset + params.limit} for next page.*")
         return "\n\n".join(parts)
     finally:
         conn.close()
@@ -255,15 +189,11 @@ async def calibre_search_content(params: SearchContentInput) -> str:
     try:
         search_term = f"%{params.query}%"
         rows = conn.execute(
-            "SELECT bt.book, bt.format, bt.searchable_text "
-            "FROM fts_db.books_text bt WHERE bt.searchable_text LIKE ? "
-            "GROUP BY bt.book LIMIT ? OFFSET ?",
+            "SELECT bt.book, bt.format, bt.searchable_text FROM fts_db.books_text bt WHERE bt.searchable_text LIKE ? GROUP BY bt.book LIMIT ? OFFSET ?",
             (search_term, params.limit, params.offset),
         ).fetchall()
-
         if not rows:
             return f"No results for '{params.query}' in book contents."
-
         parts = [f"## Full-text search: '{params.query}'\n"]
         for row in rows:
             book_id, fmt, text = row["book"], row["format"], row["searchable_text"]
@@ -274,13 +204,12 @@ async def calibre_search_content(params: SearchContentInput) -> str:
                 snippet = ("..." if start > 0 else "") + snippet + ("..." if end < len(text) else "")
             else:
                 snippet = text[:300].replace("\n", " ") + "..."
-
             book_row = conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
             if not book_row:
                 continue
             book = build_book_dict(book_row, conn)
             parts.append(f"### {book['title']}")
-            parts.append(f"**{', '.join(book.get('authors', []))}** — indexed format: {fmt}")
+            parts.append(f"**{', '.join(book.get('authors', []))}** - indexed format: {fmt}")
             if book.get("tags"):
                 parts.append(f"Tags: {', '.join(book['tags'])}")
             parts.append(f"\n> {snippet}\n")
@@ -299,6 +228,71 @@ async def calibre_get_book(params: GetBookInput) -> str:
         if not row:
             return f"No book found with ID {params.book_id}."
         return format_book_markdown(build_book_dict(row, conn))
+    finally:
+        conn.close()
+
+
+@mcp.tool(name="calibre_get_excerpt", annotations={"title": "Extract a longer passage from a book", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def calibre_get_excerpt(params: GetExcerptInput) -> str:
+    """Extract a longer text passage from a specific book around a search term.
+    Useful to read the full context of a search result without opening the ebook.
+    Returns up to 10000 characters around the matched term.
+    Use after calibre_search_content to dive deeper into a result.
+
+    Args:
+        params (GetExcerptInput): Parameters including:
+            - book_id (int): Calibre book ID
+            - query (str): Word or phrase to find
+            - context_chars (int): Characters of context (default 2000, max 10000)
+            - occurrence (int): Which occurrence (default 1 = first)
+
+    Returns:
+        str: The extracted passage with book metadata
+    """
+    conn = get_db()
+    try:
+        book_row = conn.execute("SELECT * FROM books WHERE id = ?", (params.book_id,)).fetchone()
+        if not book_row:
+            return f"No book found with ID {params.book_id}."
+        text_row = conn.execute(
+            "SELECT searchable_text, format FROM fts_db.books_text WHERE book = ? LIMIT 1",
+            (params.book_id,),
+        ).fetchone()
+        if not text_row:
+            return f"No indexed text found for book ID {params.book_id}."
+        text = text_row["searchable_text"]
+        fmt = text_row["format"]
+        book = build_book_dict(book_row, conn)
+        lower_text = text.lower()
+        lower_query = params.query.lower()
+        pos = -1
+        for i in range(params.occurrence):
+            pos = lower_text.find(lower_query, pos + 1)
+            if pos == -1:
+                if i == 0:
+                    return f"'{params.query}' not found in '{book['title']}'."
+                else:
+                    return f"Only {i} occurrence(s) of '{params.query}' found in '{book['title']}'. Requested #{params.occurrence}."
+        half_ctx = params.context_chars // 2
+        start = max(0, pos - half_ctx)
+        end = min(len(text), pos + len(params.query) + half_ctx)
+        if start > 0:
+            space_pos = text.find(" ", start)
+            if space_pos != -1 and space_pos < start + 50:
+                start = space_pos + 1
+        if end < len(text):
+            space_pos = text.rfind(" ", end - 50, end)
+            if space_pos != -1:
+                end = space_pos
+        excerpt = text[start:end]
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(text) else ""
+        authors = ", ".join(book.get("authors", []))
+        header = f"### {book['title']}\n**{authors}** - format: {fmt}\n"
+        if book.get("tags"):
+            header += f"Tags: {', '.join(book['tags'])}\n"
+        header += f"*Occurrence {params.occurrence} of '{params.query}' - showing {len(excerpt)} chars of context*\n"
+        return f"{header}\n---\n\n{prefix}{excerpt}{suffix}\n\n---\n*Calibre ID: {params.book_id}*"
     finally:
         conn.close()
 
@@ -391,10 +385,6 @@ async def calibre_stats() -> str:
     finally:
         conn.close()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
