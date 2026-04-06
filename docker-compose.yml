@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  calibre-mcp:
+    build: .
+    container_name: calibre-mcp
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    volumes:
+      # Mount your Calibre library folder READ-ONLY
+      # This folder must contain metadata.db and full-text-search.db
+      - /path/to/your/calibre/library:/calibre-library:ro
+    environment:
+      - CALIBRE_LIBRARY_PATH=/calibre-library
+      - MCP_PORT=8100
+      - LOG_LEVEL=INFO
